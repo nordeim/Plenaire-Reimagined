@@ -15,9 +15,18 @@ import {
   insertEnquirySchema
 } from "@shared/schema";
 import { ZodError } from "zod";
-import { authenticate, requireAuth } from "./middleware/auth";
+import { authenticate, requireAuth, requireAdmin } from "./middleware/auth";
 import { comparePassword, hashPassword } from "./utils/password";
 import Stripe from "stripe";
+
+// Define custom session interface
+declare global {
+  namespace Express {
+    interface Session {
+      captchaText?: string;
+    }
+  }
+}
 import cookieParser from "cookie-parser";
 
 // Initialize Stripe with secret key if available
@@ -59,10 +68,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Create session
       const session = await storage.createSession(user.id);
       
-      // Set session cookie
+      // Set session cookie - expires when browser is closed (no maxAge)
       res.cookie("sessionId", session.id, {
         httpOnly: true,
-        maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
         sameSite: "strict",
         secure: process.env.NODE_ENV === "production"
       });
@@ -87,36 +95,125 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       // Get user by email
       const user = await storage.getUserByEmail(data.email);
+      
+      // Verify captcha if provided
+      if (data.captcha) {
+        // Check in both the memory session (req.session) and the database session (via cookies)
+        let expectedCaptcha = req.session?.captchaText;
+        console.log("Memory session captcha:", expectedCaptcha);
+        
+        // If not in memory session, try to get from database session
+        if (!expectedCaptcha && req.cookies.sessionId) {
+          const session = await storage.getSessionById(req.cookies.sessionId);
+          expectedCaptcha = session?.captchaText || undefined;
+          console.log("Database session captcha:", expectedCaptcha);
+        }
+        
+        console.log("Provided captcha:", data.captcha);
+        console.log("Expected captcha:", expectedCaptcha);
+        
+        if (!expectedCaptcha || data.captcha !== expectedCaptcha) {
+          return res.status(400).json({ 
+            message: "Incorrect security code. Please try again.",
+            requireCaptcha: true 
+          });
+        }
+        
+        // Clear the captcha after verification
+        if (req.session) {
+          req.session.captchaText = undefined;
+        }
+        
+        if (req.cookies.sessionId) {
+          await storage.updateSessionCaptcha(req.cookies.sessionId, ""); // Clear it in the database
+        }
+      }
+      
+      // Check if captcha is required but not provided
+      if (user && user.loginAttempts && user.loginAttempts >= 3 && !data.captcha) {
+        return res.status(400).json({ 
+          message: "Security code is required for this account.",
+          requireCaptcha: true 
+        });
+      }
       if (!user) {
-        return res.status(401).json({ message: "Invalid credentials" });
+        return res.status(401).json({ message: "User not found. Please check your email address." });
+      }
+      
+      // Check for account lockout
+      const now = new Date();
+      if (user.lockUntil && user.lockUntil > now) {
+        const minutesLeft = Math.ceil((user.lockUntil.getTime() - now.getTime()) / (60 * 1000));
+        return res.status(401).json({ 
+          message: `Account temporarily locked. Please try again in ${minutesLeft} minute${minutesLeft !== 1 ? 's' : ''}.` 
+        });
       }
       
       // Check password
       const passwordMatch = await comparePassword(data.password, user.password);
       if (!passwordMatch) {
-        return res.status(401).json({ message: "Invalid credentials" });
+        // Increment login attempts
+        const loginAttempts = (user.loginAttempts || 0) + 1;
+        const updateData: any = { loginAttempts };
+        
+        // If 5 or more attempts, lock the account for 30 minutes
+        if (loginAttempts >= 5) {
+          const lockUntil = new Date();
+          lockUntil.setMinutes(lockUntil.getMinutes() + 30);
+          updateData.lockUntil = lockUntil;
+        }
+        
+        await storage.updateUser(user.id, updateData);
+        
+        return res.status(401).json({ 
+          message: `Incorrect password. ${5 - loginAttempts} attempt${loginAttempts !== 4 ? 's' : ''} remaining.`,
+          requireCaptcha: loginAttempts >= 3
+        });
+      }
+      
+      // Reset login attempts on successful login
+      if ((user.loginAttempts && user.loginAttempts > 0) || user.lockUntil) {
+        await storage.updateUser(user.id, {
+          loginAttempts: 0,
+          lockUntil: null
+        });
       }
       
       // Create session
       const session = await storage.createSession(user.id);
       
-      // Set session cookie
+      // Set session cookie - expires when browser is closed (no maxAge)
       res.cookie("sessionId", session.id, {
         httpOnly: true,
-        maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
         sameSite: "strict",
         secure: process.env.NODE_ENV === "production"
       });
       
+      // Log user data for debugging
+      console.log("Login success - User data:", {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        roleType: typeof user.role
+      });
+      
       // Send user info (without password)
       const { password, ...userWithoutPassword } = user;
-      res.json(userWithoutPassword);
+      
+      // Ensure role is properly sent (explicitly include it even if null)
+      const userData = {
+        ...userWithoutPassword,
+        // Ensure role is a string value to avoid type issues on the client
+        role: user.role || 'user'
+      };
+      
+      res.json(userData);
     } catch (error) {
       if (error instanceof ZodError) {
         res.status(400).json({ message: "Invalid input", errors: error.errors });
       } else {
         console.error("Login error:", error);
-        res.status(500).json({ message: "Login failed" });
+        res.status(500).json({ message: "Login failed due to a server error. Please try again later." });
       }
     }
   });
@@ -139,6 +236,59 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
   
+  // We already have the session interface declared at the top of the file
+
+  // Generate simple captcha for login attempts
+  app.get("/api/auth/captcha", async (req: Request, res: Response) => {
+    try {
+      // Generate a random 6-digit number for simplicity
+      const captchaText = Math.floor(100000 + Math.random() * 900000).toString();
+      
+      // Create a temporary session if one doesn't exist
+      if (!req.user) {
+        // Create a 15-minute session for captcha
+        const tempUser = await storage.getUserByEmail("admin@localhost.localdomain");
+        if (!tempUser) {
+          return res.status(500).json({ message: "Failed to generate captcha session" });
+        }
+        
+        const session = await storage.createSession(tempUser.id);
+        
+        // Update session with captcha text
+        await storage.updateSessionCaptcha(session.id, captchaText);
+        
+        // Set the session ID in a cookie
+        res.cookie('sessionId', session.id, { 
+          httpOnly: true,
+          sameSite: 'strict',
+          secure: process.env.NODE_ENV === 'production',
+          maxAge: 15 * 60 * 1000 // 15 minutes
+        });
+        
+        // Also store in memory session for compatibility
+        if (req.session) {
+          req.session.captchaText = captchaText;
+        }
+      } else if (req.session) {
+        // User is logged in, use their existing session
+        req.session.captchaText = captchaText;
+        
+        // Also update the database session if we have the ID
+        if (req.cookies.sessionId) {
+          await storage.updateSessionCaptcha(req.cookies.sessionId, captchaText);
+        }
+      }
+      
+      console.log("Generated captcha:", captchaText); // Logging for debugging
+      
+      // Return the captcha text for display
+      res.json({ captcha: captchaText });
+    } catch (error) {
+      console.error("Captcha generation error:", error);
+      res.status(500).json({ message: "Failed to generate captcha" });
+    }
+  });
+  
   // Get current user
   app.get("/api/auth/me", requireAuth, async (req: Request, res: Response) => {
     try {
@@ -146,12 +296,29 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const user = await storage.getUserById(req.user!.id);
       
       if (!user) {
+        console.error(`User not found in DB with ID: ${req.user!.id}`);
         return res.status(404).json({ message: "User not found" });
       }
       
+      // Log the user data to debug
+      console.log("User data from /api/auth/me endpoint:", {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        roleType: typeof user.role
+      });
+      
       // Remove sensitive data
       const { password, ...userWithoutPassword } = user;
-      res.json(userWithoutPassword);
+      
+      // Ensure role is properly sent (explicitly include it even if null)
+      const userData = {
+        ...userWithoutPassword,
+        // Ensure role is a string value to avoid type issues on the client
+        role: user.role || 'user'
+      };
+      
+      res.json(userData);
     } catch (error) {
       console.error("Get user error:", error);
       res.status(500).json({ message: "Failed to get user data" });
@@ -916,6 +1083,229 @@ export async function registerRoutes(app: Express): Promise<Server> {
       } else {
         res.status(500).json({ message: "Failed to process subscription" });
       }
+    }
+  });
+  
+  // ===================== Admin Routes =====================
+  
+  // Get all users (admin only)
+  app.get("/api/admin/users", requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const users = await storage.getAllUsers();
+      // Remove passwords from the response
+      const usersWithoutPasswords = users.map(user => {
+        const { password, ...userWithoutPassword } = user;
+        return userWithoutPassword;
+      });
+      res.json(usersWithoutPasswords);
+    } catch (error) {
+      console.error("Get all users error:", error);
+      res.status(500).json({ message: "Failed to fetch users" });
+    }
+  });
+  
+  // Get all products (admin only)
+  app.get("/api/admin/products", requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const products = await storage.getAllProducts();
+      res.json(products);
+    } catch (error) {
+      console.error("Get all products error:", error);
+      res.status(500).json({ message: "Failed to fetch products" });
+    }
+  });
+  
+  // Create product (admin only)
+  app.post("/api/admin/products", requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const product = await storage.createProduct(req.body);
+      res.status(201).json(product);
+    } catch (error) {
+      console.error("Create product error:", error);
+      res.status(500).json({ message: "Failed to create product" });
+    }
+  });
+  
+  // Update product (admin only)
+  app.put("/api/admin/products/:id", requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) {
+        return res.status(400).json({ message: "Invalid product ID" });
+      }
+      
+      const product = await storage.updateProduct(id, req.body);
+      if (!product) {
+        return res.status(404).json({ message: "Product not found" });
+      }
+      
+      res.json(product);
+    } catch (error) {
+      console.error("Update product error:", error);
+      res.status(500).json({ message: "Failed to update product" });
+    }
+  });
+  
+  // Delete product (admin only)
+  app.delete("/api/admin/products/:id", requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) {
+        return res.status(400).json({ message: "Invalid product ID" });
+      }
+      
+      await storage.deleteProduct(id);
+      res.status(204).end();
+    } catch (error) {
+      console.error("Delete product error:", error);
+      res.status(500).json({ message: "Failed to delete product" });
+    }
+  });
+  
+  // Get all categories (admin only)
+  app.get("/api/admin/categories", requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const categories = await storage.getAllCategories();
+      res.json(categories);
+    } catch (error) {
+      console.error("Get all categories error:", error);
+      res.status(500).json({ message: "Failed to fetch categories" });
+    }
+  });
+  
+  // Create category (admin only)
+  app.post("/api/admin/categories", requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const category = await storage.createCategory(req.body);
+      res.status(201).json(category);
+    } catch (error) {
+      console.error("Create category error:", error);
+      res.status(500).json({ message: "Failed to create category" });
+    }
+  });
+  
+  // Update category (admin only)
+  app.put("/api/admin/categories/:id", requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) {
+        return res.status(400).json({ message: "Invalid category ID" });
+      }
+      
+      const category = await storage.updateCategory(id, req.body);
+      if (!category) {
+        return res.status(404).json({ message: "Category not found" });
+      }
+      
+      res.json(category);
+    } catch (error) {
+      console.error("Update category error:", error);
+      res.status(500).json({ message: "Failed to update category" });
+    }
+  });
+  
+  // Delete category (admin only)
+  app.delete("/api/admin/categories/:id", requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) {
+        return res.status(400).json({ message: "Invalid category ID" });
+      }
+      
+      await storage.deleteCategory(id);
+      res.status(204).end();
+    } catch (error) {
+      console.error("Delete category error:", error);
+      res.status(500).json({ message: "Failed to delete category" });
+    }
+  });
+  
+  // Get all orders (admin only)
+  app.get("/api/admin/orders", requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const orders = await storage.getAllOrders();
+      res.json(orders);
+    } catch (error) {
+      console.error("Get all orders error:", error);
+      res.status(500).json({ message: "Failed to fetch orders" });
+    }
+  });
+  
+  // Update order status (admin only)
+  app.put("/api/admin/orders/:id/status", requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) {
+        return res.status(400).json({ message: "Invalid order ID" });
+      }
+      
+      const { status } = req.body;
+      if (!status || !["pending", "processing", "shipped", "delivered", "cancelled"].includes(status)) {
+        return res.status(400).json({ message: "Invalid status value" });
+      }
+      
+      const order = await storage.updateOrderStatus(id, status);
+      if (!order) {
+        return res.status(404).json({ message: "Order not found" });
+      }
+      
+      res.json(order);
+    } catch (error) {
+      console.error("Update order status error:", error);
+      res.status(500).json({ message: "Failed to update order status" });
+    }
+  });
+  
+  // Get all enquiries (admin only)
+  app.get("/api/admin/enquiries", requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const enquiries = await storage.getAllEnquiries();
+      res.json(enquiries);
+    } catch (error) {
+      console.error("Get all enquiries error:", error);
+      res.status(500).json({ message: "Failed to fetch enquiries" });
+    }
+  });
+  
+  // Resolve enquiry (admin only)
+  app.put("/api/admin/enquiries/:id/resolve", requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) {
+        return res.status(400).json({ message: "Invalid enquiry ID" });
+      }
+      
+      const enquiry = await storage.resolveEnquiry(id);
+      if (!enquiry) {
+        return res.status(404).json({ message: "Enquiry not found" });
+      }
+      
+      res.json(enquiry);
+    } catch (error) {
+      console.error("Resolve enquiry error:", error);
+      res.status(500).json({ message: "Failed to resolve enquiry" });
+    }
+  });
+  
+  // Get all newsletter subscriptions (admin only)
+  app.get("/api/admin/newsletter-subscriptions", requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const subscriptions = await storage.getAllNewsletterSubscriptions();
+      res.json(subscriptions);
+    } catch (error) {
+      console.error("Get all newsletter subscriptions error:", error);
+      res.status(500).json({ message: "Failed to fetch newsletter subscriptions" });
+    }
+  });
+  
+  // Get all reviews (admin only)
+  app.get("/api/admin/reviews", requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const reviews = await storage.getAllReviews();
+      res.json(reviews);
+    } catch (error) {
+      console.error("Get all reviews error:", error);
+      res.status(500).json({ message: "Failed to fetch reviews" });
     }
   });
 

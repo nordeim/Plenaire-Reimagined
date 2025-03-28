@@ -18,6 +18,8 @@ import {
   orderItems,
   enquiries,
   sessions,
+  orderStatusEnum,
+  paymentStatusEnum,
   type Product, 
   type InsertProduct,
   type Category, 
@@ -50,6 +52,10 @@ import {
 // Create DB client
 const connectionString = process.env.DATABASE_URL;
 
+// Define types for order and payment status from enums
+type OrderStatus = typeof orderStatusEnum.enumValues[number];
+type PaymentStatus = typeof paymentStatusEnum.enumValues[number];
+
 // Storage interface
 export interface IStorage {
   // User methods
@@ -57,10 +63,12 @@ export interface IStorage {
   getUserByEmail(email: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User | undefined>;
   updateUser(id: number, user: Partial<User>): Promise<User | undefined>;
+  getAllUsers(): Promise<User[]>;
   
   // Session methods
   createSession(userId: number): Promise<Session>;
   getSessionById(id: string): Promise<Session | undefined>;
+  updateSessionCaptcha(id: string, captchaText: string): Promise<Session | undefined>;
   deleteSession(id: string): Promise<void>;
   
   // Product methods
@@ -68,6 +76,8 @@ export interface IStorage {
   getProduct(id: number): Promise<Product | undefined>;
   getFeaturedProduct(): Promise<Product | undefined>;
   createProduct(product: InsertProduct): Promise<Product>;
+  updateProduct(id: number, product: Partial<Product>): Promise<Product | undefined>;
+  deleteProduct(id: number): Promise<void>;
   searchProducts(query: string): Promise<Product[]>;
   getProductsByCategory(categoryId: number): Promise<Product[]>;
   
@@ -75,14 +85,19 @@ export interface IStorage {
   getAllCategories(): Promise<Category[]>;
   getCategory(id: number): Promise<Category | undefined>;
   createCategory(category: InsertCategory): Promise<Category>;
+  updateCategory(id: number, category: Partial<Category>): Promise<Category | undefined>;
+  deleteCategory(id: number): Promise<void>;
   
   // Lifestyle methods
   getAllLifestyleItems(): Promise<LifestyleItem[]>;
   getLifestyleItem(id: number): Promise<LifestyleItem | undefined>;
   createLifestyleItem(item: InsertLifestyleItem): Promise<LifestyleItem>;
+  updateLifestyleItem(id: number, item: Partial<LifestyleItem>): Promise<LifestyleItem | undefined>;
+  deleteLifestyleItem(id: number): Promise<void>;
   
   // Newsletter methods
   createNewsletterSubscription(subscription: InsertNewsletterSubscription): Promise<NewsletterSubscription>;
+  getAllNewsletterSubscriptions(): Promise<NewsletterSubscription[]>;
   
   // Address methods
   getAddressesByUserId(userId: number): Promise<Address[]>;
@@ -101,6 +116,7 @@ export interface IStorage {
   getReviewByUserAndProduct(userId: number, productId: number): Promise<Review | undefined>;
   createReview(review: InsertReview): Promise<Review>;
   updateReview(id: number, review: Partial<Review>): Promise<Review | undefined>;
+  getAllReviews(): Promise<Review[]>;
   
   // Cart methods
   getCartByUserId(userId: number): Promise<Cart | undefined>;
@@ -116,12 +132,16 @@ export interface IStorage {
   getOrderById(id: number): Promise<Order | undefined>;
   getOrderWithItems(id: number): Promise<(Order & { items: (OrderItem & { product: Product })[] }) | undefined>;
   createOrder(order: InsertOrder, items: InsertOrderItem[]): Promise<Order>;
-  updateOrderStatus(id: number, status: string): Promise<Order | undefined>;
-  updatePaymentStatus(id: number, status: string, paymentIntentId?: string): Promise<Order | undefined>;
+  updateOrderStatus(id: number, status: OrderStatus): Promise<Order | undefined>;
+  updatePaymentStatus(id: number, status: PaymentStatus, paymentIntentId?: string): Promise<Order | undefined>;
+  getAllOrders(): Promise<Order[]>;
   
   // Enquiry methods
   createEnquiry(enquiry: InsertEnquiry): Promise<Enquiry>;
   getEnquiriesByUserId(userId: number): Promise<Enquiry[]>;
+  getAllEnquiries(): Promise<Enquiry[]>;
+  getEnquiry(id: number): Promise<Enquiry | undefined>;
+  resolveEnquiry(id: number): Promise<Enquiry | undefined>;
   
   // Helper methods
   generateOrderNumber(): string;
@@ -304,6 +324,10 @@ export class PostgresStorage implements IStorage {
     return result[0];
   }
   
+  async getAllUsers(): Promise<User[]> {
+    return this.db.select().from(users).orderBy(desc(users.createdAt));
+  }
+  
   // Session methods
   async createSession(userId: number): Promise<Session> {
     // Set expiry to 7 days from now
@@ -320,6 +344,15 @@ export class PostgresStorage implements IStorage {
   
   async getSessionById(id: string): Promise<Session | undefined> {
     const result = await this.db.select().from(sessions).where(eq(sessions.id, id)).limit(1);
+    return result[0];
+  }
+  
+  async updateSessionCaptcha(id: string, captchaText: string): Promise<Session | undefined> {
+    const result = await this.db.update(sessions)
+      .set({ captchaText })
+      .where(eq(sessions.id, id))
+      .returning();
+    
     return result[0];
   }
   
@@ -347,6 +380,22 @@ export class PostgresStorage implements IStorage {
     return result[0];
   }
   
+  async updateProduct(id: number, productData: Partial<Product>): Promise<Product | undefined> {
+    const result = await this.db.update(products)
+      .set({
+        ...productData,
+        updatedAt: new Date()
+      })
+      .where(eq(products.id, id))
+      .returning();
+    
+    return result[0];
+  }
+  
+  async deleteProduct(id: number): Promise<void> {
+    await this.db.delete(products).where(eq(products.id, id));
+  }
+  
   async searchProducts(query: string): Promise<Product[]> {
     return this.db.select().from(products).where(
       sql`to_tsvector('english', ${products.name} || ' ' || ${products.description}) @@ to_tsquery('english', ${query.replace(/\s+/g, ' & ')})`
@@ -372,6 +421,22 @@ export class PostgresStorage implements IStorage {
     return result[0];
   }
   
+  async updateCategory(id: number, category: Partial<Category>): Promise<Category | undefined> {
+    const result = await this.db.update(categories)
+      .set({
+        ...category,
+        updatedAt: new Date()
+      })
+      .where(eq(categories.id, id))
+      .returning();
+    
+    return result[0];
+  }
+  
+  async deleteCategory(id: number): Promise<void> {
+    await this.db.delete(categories).where(eq(categories.id, id));
+  }
+  
   // Lifestyle methods
   async getAllLifestyleItems(): Promise<LifestyleItem[]> {
     return this.db.select().from(lifestyleItems);
@@ -387,10 +452,30 @@ export class PostgresStorage implements IStorage {
     return result[0];
   }
   
+  async updateLifestyleItem(id: number, item: Partial<LifestyleItem>): Promise<LifestyleItem | undefined> {
+    const result = await this.db.update(lifestyleItems)
+      .set({
+        ...item,
+        updatedAt: new Date()
+      })
+      .where(eq(lifestyleItems.id, id))
+      .returning();
+    
+    return result[0];
+  }
+  
+  async deleteLifestyleItem(id: number): Promise<void> {
+    await this.db.delete(lifestyleItems).where(eq(lifestyleItems.id, id));
+  }
+  
   // Newsletter methods
   async createNewsletterSubscription(subscription: InsertNewsletterSubscription): Promise<NewsletterSubscription> {
     const result = await this.db.insert(newsletterSubscriptions).values(subscription).returning();
     return result[0];
+  }
+  
+  async getAllNewsletterSubscriptions(): Promise<NewsletterSubscription[]> {
+    return this.db.select().from(newsletterSubscriptions).orderBy(desc(newsletterSubscriptions.createdAt));
   }
   
   // Address methods
@@ -550,6 +635,10 @@ export class PostgresStorage implements IStorage {
     return result[0];
   }
   
+  async getAllReviews(): Promise<Review[]> {
+    return this.db.select().from(reviews).orderBy(desc(reviews.createdAt));
+  }
+  
   // Cart methods
   async getCartByUserId(userId: number): Promise<Cart | undefined> {
     const result = await this.db.select().from(carts).where(eq(carts.userId, userId)).limit(1);
@@ -684,7 +773,7 @@ export class PostgresStorage implements IStorage {
     return newOrder;
   }
   
-  async updateOrderStatus(id: number, status: string): Promise<Order | undefined> {
+  async updateOrderStatus(id: number, status: OrderStatus): Promise<Order | undefined> {
     const result = await this.db.update(orders)
       .set({
         status,
@@ -696,7 +785,7 @@ export class PostgresStorage implements IStorage {
     return result[0];
   }
   
-  async updatePaymentStatus(id: number, status: string, paymentIntentId?: string): Promise<Order | undefined> {
+  async updatePaymentStatus(id: number, status: PaymentStatus, paymentIntentId?: string): Promise<Order | undefined> {
     const updateData: any = {
       paymentStatus: status,
       updatedAt: new Date()
@@ -714,6 +803,10 @@ export class PostgresStorage implements IStorage {
     return result[0];
   }
   
+  async getAllOrders(): Promise<Order[]> {
+    return this.db.select().from(orders).orderBy(desc(orders.createdAt));
+  }
+  
   // Enquiry methods
   async createEnquiry(enquiry: InsertEnquiry): Promise<Enquiry> {
     const result = await this.db.insert(enquiries).values(enquiry).returning();
@@ -722,6 +815,27 @@ export class PostgresStorage implements IStorage {
   
   async getEnquiriesByUserId(userId: number): Promise<Enquiry[]> {
     return this.db.select().from(enquiries).where(eq(enquiries.userId, userId));
+  }
+  
+  async getAllEnquiries(): Promise<Enquiry[]> {
+    return this.db.select().from(enquiries).orderBy(desc(enquiries.createdAt));
+  }
+  
+  async getEnquiry(id: number): Promise<Enquiry | undefined> {
+    const result = await this.db.select().from(enquiries).where(eq(enquiries.id, id)).limit(1);
+    return result[0];
+  }
+  
+  async resolveEnquiry(id: number): Promise<Enquiry | undefined> {
+    const result = await this.db.update(enquiries)
+      .set({
+        isResolved: true,
+        updatedAt: new Date()
+      })
+      .where(eq(enquiries.id, id))
+      .returning();
+    
+    return result[0];
   }
   
   // Helper methods
@@ -965,6 +1079,10 @@ export class MemStorage implements IStorage {
     return updatedUser;
   }
   
+  async getAllUsers(): Promise<User[]> {
+    return Array.from(this.users.values());
+  }
+  
   // Session methods
   async createSession(userId: number): Promise<Session> {
     const id = crypto.randomUUID();
@@ -977,7 +1095,8 @@ export class MemStorage implements IStorage {
       id,
       userId,
       expiresAt,
-      createdAt: new Date()
+      createdAt: new Date(),
+      captchaText: null
     };
     
     this.sessions.set(id, session);
@@ -986,6 +1105,19 @@ export class MemStorage implements IStorage {
   
   async getSessionById(id: string): Promise<Session | undefined> {
     return this.sessions.get(id);
+  }
+  
+  async updateSessionCaptcha(id: string, captchaText: string): Promise<Session | undefined> {
+    const session = this.sessions.get(id);
+    if (!session) return undefined;
+    
+    const updatedSession: Session = {
+      ...session,
+      captchaText
+    };
+    
+    this.sessions.set(id, updatedSession);
+    return updatedSession;
   }
   
   async deleteSession(id: string): Promise<void> {
@@ -1017,6 +1149,24 @@ export class MemStorage implements IStorage {
     
     this.productsMap.set(id, newProduct);
     return newProduct;
+  }
+  
+  async updateProduct(id: number, productData: Partial<Product>): Promise<Product | undefined> {
+    const product = this.productsMap.get(id);
+    if (!product) return undefined;
+    
+    const updatedProduct = {
+      ...product,
+      ...productData,
+      updatedAt: new Date()
+    };
+    
+    this.productsMap.set(id, updatedProduct);
+    return updatedProduct;
+  }
+  
+  async deleteProduct(id: number): Promise<void> {
+    this.productsMap.delete(id);
   }
   
   async searchProducts(query: string): Promise<Product[]> {
@@ -1056,6 +1206,24 @@ export class MemStorage implements IStorage {
     return newCategory;
   }
   
+  async updateCategory(id: number, categoryData: Partial<Category>): Promise<Category | undefined> {
+    const category = this.categoriesMap.get(id);
+    if (!category) return undefined;
+    
+    const updatedCategory = {
+      ...category,
+      ...categoryData,
+      updatedAt: new Date()
+    };
+    
+    this.categoriesMap.set(id, updatedCategory);
+    return updatedCategory;
+  }
+  
+  async deleteCategory(id: number): Promise<void> {
+    this.categoriesMap.delete(id);
+  }
+  
   // Lifestyle methods
   async getAllLifestyleItems(): Promise<LifestyleItem[]> {
     return Array.from(this.lifestyleItemsMap.values());
@@ -1079,6 +1247,24 @@ export class MemStorage implements IStorage {
     return newItem;
   }
   
+  async updateLifestyleItem(id: number, itemData: Partial<LifestyleItem>): Promise<LifestyleItem | undefined> {
+    const item = this.lifestyleItemsMap.get(id);
+    if (!item) return undefined;
+    
+    const updatedItem = {
+      ...item,
+      ...itemData,
+      updatedAt: new Date()
+    };
+    
+    this.lifestyleItemsMap.set(id, updatedItem);
+    return updatedItem;
+  }
+  
+  async deleteLifestyleItem(id: number): Promise<void> {
+    this.lifestyleItemsMap.delete(id);
+  }
+  
   // Newsletter methods
   async createNewsletterSubscription(subscription: InsertNewsletterSubscription): Promise<NewsletterSubscription> {
     const id = this.newsletterSubscriptionIdCounter++;
@@ -1090,6 +1276,10 @@ export class MemStorage implements IStorage {
     
     this.newsletterSubscriptionsMap.set(id, newSubscription);
     return newSubscription;
+  }
+  
+  async getAllNewsletterSubscriptions(): Promise<NewsletterSubscription[]> {
+    return Array.from(this.newsletterSubscriptionsMap.values());
   }
   
   // Address methods
@@ -1262,6 +1452,10 @@ export class MemStorage implements IStorage {
     return updatedReview;
   }
   
+  async getAllReviews(): Promise<Review[]> {
+    return Array.from(this.reviewsMap.values());
+  }
+  
   // Cart methods
   async getCartByUserId(userId: number): Promise<Cart | undefined> {
     return Array.from(this.cartsMap.values()).find(
@@ -1412,7 +1606,7 @@ export class MemStorage implements IStorage {
     return newOrder;
   }
   
-  async updateOrderStatus(id: number, status: string): Promise<Order | undefined> {
+  async updateOrderStatus(id: number, status: OrderStatus): Promise<Order | undefined> {
     const order = this.ordersMap.get(id);
     if (!order) return undefined;
     
@@ -1426,7 +1620,7 @@ export class MemStorage implements IStorage {
     return updatedOrder;
   }
   
-  async updatePaymentStatus(id: number, status: string, paymentIntentId?: string): Promise<Order | undefined> {
+  async updatePaymentStatus(id: number, status: PaymentStatus, paymentIntentId?: string): Promise<Order | undefined> {
     const order = this.ordersMap.get(id);
     if (!order) return undefined;
     
@@ -1439,6 +1633,10 @@ export class MemStorage implements IStorage {
     
     this.ordersMap.set(id, updatedOrder);
     return updatedOrder;
+  }
+  
+  async getAllOrders(): Promise<Order[]> {
+    return Array.from(this.ordersMap.values());
   }
   
   // Enquiry methods
@@ -1459,6 +1657,27 @@ export class MemStorage implements IStorage {
     return Array.from(this.enquiriesMap.values()).filter(
       enquiry => enquiry.userId === userId
     );
+  }
+  
+  async getAllEnquiries(): Promise<Enquiry[]> {
+    return Array.from(this.enquiriesMap.values());
+  }
+  
+  async getEnquiry(id: number): Promise<Enquiry | undefined> {
+    return this.enquiriesMap.get(id);
+  }
+  
+  async resolveEnquiry(id: number): Promise<Enquiry | undefined> {
+    const enquiry = this.enquiriesMap.get(id);
+    if (!enquiry) return undefined;
+    
+    const updatedEnquiry = {
+      ...enquiry,
+      isResolved: true
+    };
+    
+    this.enquiriesMap.set(id, updatedEnquiry);
+    return updatedEnquiry;
   }
   
   // Helper methods
