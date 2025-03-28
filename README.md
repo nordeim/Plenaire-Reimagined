@@ -4,7 +4,7 @@
 ![image](https://github.com/user-attachments/assets/6611b71d-f2dd-4115-ab9e-ea3dd7f1071e)
 ![image](https://github.com/user-attachments/assets/893089ed-a944-4f47-8572-d1778fa05ace)
 
-[desgin document](https://github.com/nordeim/Plenaire-Reimagined/blob/main/validated_design_document_replit_Plenaire_reimagined.md)  
-[database creation script](https://github.com/nordeim/Plenaire-Reimagined/blob/main/validated_Postgresql_database-creation_script_for_Replit_Plenaire.md)  
+[desgin document](https://github.com/nordeim/Plenaire-Reimagined/blob/main/detailed_technical_design_specification_document_updated.md)  
+[database creation script](https://github.com/nordeim/Plenaire-Reimagined/blob/main/create_db_updated.py)  
 
 [website](https://replit.com/@phileaywonglump/TaskMaster)
