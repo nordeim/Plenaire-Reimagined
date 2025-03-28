@@ -141,11 +141,36 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const registerMutation = useMutation({
     mutationFn: async (userData: any) => {
-      const res = await apiRequest("POST", "/api/auth/register", userData);
+      // Map frontend field names to match what the API expects
+      const apiData = {
+        email: userData.email || userData.username, // Support both email and username fields
+        firstName: userData.firstName,
+        lastName: userData.lastName,
+        password: userData.password,
+        confirmPassword: userData.confirmPassword,
+        phone: userData.phone || '',
+      };
+      
+      console.log("Registration attempt with data:", {
+        ...apiData,
+        password: apiData.password ? "******" : undefined,
+        confirmPassword: apiData.confirmPassword ? "******" : undefined
+      });
+      
+      const res = await apiRequest("POST", "/api/auth/register", apiData);
+      
       if (!res.ok) {
-        const errorData = await res.json();
-        throw new Error(errorData.message || "Registration failed");
+        let errorMessage = "Registration failed";
+        try {
+          const errorData = await res.json();
+          console.log("Registration error data:", errorData);
+          errorMessage = errorData.message || errorMessage;
+        } catch (parseError) {
+          console.error("Error parsing registration error response:", parseError);
+        }
+        throw new Error(errorMessage);
       }
+      
       return await res.json();
     },
     onSuccess: () => {
@@ -157,6 +182,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       });
     },
     onError: (error: Error) => {
+      console.error("Registration error in mutation:", error);
       toast({
         title: "Registration failed",
         description: error.message,
@@ -171,9 +197,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (!res.ok) {
         throw new Error("Logout failed");
       }
+      return res;
     },
     onSuccess: () => {
+      // Ensure all auth-related queries are invalidated/reset
       queryClient.setQueryData(["/api/auth/me"], null);
+      queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] });
+      
+      // Clear any other cached data that should be private
+      queryClient.invalidateQueries({ queryKey: ["/api/cart"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/orders"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/addresses"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/wishlist"] });
+      
       toast({
         title: "Logged out",
         description: "You have been logged out successfully",
@@ -181,6 +217,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       });
     },
     onError: (error: Error) => {
+      console.error("Logout error:", error);
       toast({
         title: "Logout failed",
         description: error.message,
@@ -189,37 +226,58 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     },
   });
 
-  // Calculate admin status with robust checking
+  // Even more robust admin status checking with better debug logging
   const checkIsAdmin = () => {
     if (!user) return false;
     
-    // Robust admin check to handle potential data type issues
-    // 1. Check if role property exists and is not null
-    if (user.role === null || user.role === undefined) return false;
+    // CRITICAL: Log full user object for debugging
+    console.log("AUTH HOOK - Full user object for admin detection:", JSON.stringify(user, null, 2));
     
-    // 2. Case-insensitive comparison
-    const normalizedRole = String(user.role).toLowerCase();
-    
-    // 3. Check both exact string match and normalized match
-    const isRoleAdmin = user.role === 'admin' || normalizedRole === 'admin';
-    
-    // 4. Known admin email fallback (for extra safety)
+    // 1. Early return for known admin email (most reliable check)
     const isKnownAdminEmail = user.email === 'admin@localhost.localdomain';
     
-    // Log the admin check for debugging
-    console.log("Auth hook - Admin check:", { 
+    // 2. Direct role check - handle various formats
+    const adminValues = ['admin', 'ADMIN', 'Admin', '1'];
+    const rawRole = user.role;
+    
+    // Handle string comparison
+    let exactMatch = false;
+    if (typeof rawRole === 'string') {
+      exactMatch = adminValues.includes(rawRole);
+    }
+    
+    // 3. Case-insensitive role check for more resilience
+    let normalizedRole = '';
+    if (rawRole !== null && rawRole !== undefined) {
+      normalizedRole = String(rawRole).toLowerCase().trim();
+    }
+    const normalizedMatch = normalizedRole === 'admin';
+    
+    // 4. Numeric role check
+    const numericMatch = rawRole === 1 || rawRole === '1';
+    
+    // Combine all strategies
+    const isAdmin = exactMatch || normalizedMatch || isKnownAdminEmail || numericMatch;
+    
+    // Detailed debug logging
+    console.log("AUTH HOOK - Admin check details:", { 
       userId: user.id,
-      rawRole: user.role,
+      email: user.email,
+      rawRole: rawRole,
+      roleTypeOf: typeof rawRole,
+      roleStringified: String(rawRole),
       normalizedRole,
-      isRoleAdmin,
+      exactMatch,
+      normalizedMatch,
       isKnownAdminEmail,
-      finalResult: isRoleAdmin || isKnownAdminEmail
+      numericMatch,
+      finalResult: isAdmin
     });
     
-    return isRoleAdmin || isKnownAdminEmail;
+    return isAdmin;
   };
   
-  // Compute this once instead of on every render
+  // Compute admin status
   const isAdmin = checkIsAdmin();
 
   return (

@@ -104,7 +104,7 @@ export default function Cart() {
   };
 
   // Handle proceed to checkout
-  const handleCheckout = () => {
+  const handleCheckout = async () => {
     if (!cartItems?.length) {
       toast({
         title: 'Cart is empty',
@@ -114,7 +114,61 @@ export default function Cart() {
       return;
     }
     
-    setLocation('/checkout');
+    try {
+      console.log("Starting checkout process with items:", cartItems);
+      
+      // Create an order first with detailed error handling
+      const response = await fetch('/api/orders', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include',
+        body: JSON.stringify({
+          items: cartItems.map(item => ({
+            productId: item.product.id,
+            quantity: item.quantity
+          }))
+        })
+      });
+      
+      // Capture response regardless of status
+      const responseData = await response.json();
+      console.log("Order creation response:", response.status, responseData);
+      
+      if (!response.ok) {
+        // If unauthorized, redirect to login
+        if (response.status === 401) {
+          toast({
+            title: 'Authentication required',
+            description: 'Please sign in to complete your purchase.',
+            variant: 'destructive',
+          });
+          setLocation('/login');
+          return;
+        }
+        
+        throw new Error(responseData.message || 'Failed to create order');
+      }
+      
+      // Success path - navigate to checkout with order ID
+      console.log("Order created successfully:", responseData);
+      queryClient.invalidateQueries({ queryKey: ['/api/cart'] });
+      
+      if (responseData.id) {
+        setLocation(`/checkout/${responseData.id}`);
+      } else {
+        console.error("Order created but no ID returned:", responseData);
+        throw new Error("Order created but no ID was returned");
+      }
+    } catch (error: any) {
+      console.error("Checkout error:", error);
+      toast({
+        title: 'Checkout failed',
+        description: error.message || 'There was an error processing your checkout. Please try again.',
+        variant: 'destructive',
+      });
+    }
   };
 
   if (isLoading) {

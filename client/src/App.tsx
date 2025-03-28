@@ -47,6 +47,16 @@ function Router() {
 
   // If we're on an admin route, render the admin layout
   if (isAdminRoute) {
+    // Enhanced logging for admin route debugging
+    console.log("Rendering admin route with user:", {
+      isLoading,
+      isAuthenticated: !!user,
+      userId: user?.id,
+      userEmail: user?.email,
+      userRole: user?.role,
+      isAdmin: user?.role === 'admin' || user?.email === 'admin@localhost.localdomain'
+    });
+    
     // Admin routes should not have the regular header/footer
     return (
       <div className="flex flex-col min-h-screen">
@@ -77,6 +87,9 @@ function Router() {
           <Route path="/stripe-checkout" component={StripeCheckout} />
           <Route path="/order-confirmation/:orderId" component={OrderConfirmation} />
           <Route path="/account" component={Account} />
+          <Route path="/account/addresses" component={Account} />
+          <Route path="/account/orders" component={Account} />
+          <Route path="/account/wishlist" component={Account} />
           <Route path="/our-story" component={Story} />
           <Route path="/ingredients" component={Ingredients} />
           <Route path="/journal" component={Journal} />

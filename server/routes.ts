@@ -51,7 +51,92 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Register a new user
   app.post("/api/auth/register", async (req: Request, res: Response) => {
     try {
-      const data = insertUserSchema.parse(req.body);
+      // Clear log format that will help us debug the registration issue
+      const requestBody = {
+        email: req.body.email,
+        firstName: req.body.firstName,
+        lastName: req.body.lastName,
+        passwordProvided: !!req.body.password,
+        passwordLength: req.body.password?.length,
+        confirmPasswordProvided: !!req.body.confirmPassword,
+        passwordsMatch: req.body.password === req.body.confirmPassword
+      };
+      
+      console.log("====== REGISTRATION REQUEST RECEIVED =======");
+      console.log(JSON.stringify(requestBody, null, 2));
+      console.log("===========================================");
+      
+      // Simply create these fields if they're not already provided
+      // This will make sure firstName, lastName, and phone are at least empty strings
+      const formData = {
+        ...req.body,
+        firstName: req.body.firstName || '',
+        lastName: req.body.lastName || '',
+        phone: req.body.phone || ''
+      };
+      
+      // Validate the input data using the enhanced schema
+      const validationResult = insertUserSchema.safeParse(formData);
+      
+      // If validation fails, provide detailed error messages
+      if (!validationResult.success) {
+        const errors = validationResult.error.format();
+        
+        console.log("====== REGISTRATION VALIDATION FAILED =======");
+        console.log(JSON.stringify(errors, null, 2));
+        console.log("=============================================");
+        
+        // Determine the most important validation error to show
+        let primaryErrorMessage = "Please check your form inputs";
+        let allErrorMessages: string[] = [];
+        
+        // Process password errors first as they're most common
+        if (errors.password?._errors?.length) {
+          primaryErrorMessage = errors.password._errors[0];
+          allErrorMessages.push(`Password: ${errors.password._errors.join(', ')}`);
+        }
+        else if (errors.confirmPassword?._errors?.length) {
+          primaryErrorMessage = errors.confirmPassword._errors[0];
+          allErrorMessages.push(`Confirm Password: ${errors.confirmPassword._errors.join(', ')}`);
+        }
+        else if (errors.email?._errors?.length) {
+          primaryErrorMessage = errors.email._errors[0];
+          allErrorMessages.push(`Email: ${errors.email._errors.join(', ')}`);
+        }
+        else if (errors.firstName?._errors?.length) {
+          primaryErrorMessage = errors.firstName._errors[0]; 
+          allErrorMessages.push(`First Name: ${errors.firstName._errors.join(', ')}`);
+        }
+        else if (errors.lastName?._errors?.length) {
+          primaryErrorMessage = errors.lastName._errors[0];
+          allErrorMessages.push(`Last Name: ${errors.lastName._errors.join(', ')}`);
+        }
+        
+        // Collect all other error messages
+        Object.entries(errors).forEach(([field, error]) => {
+          if (field !== '_errors' && 
+              typeof error === 'object' && 
+              error !== null && 
+              '_errors' in error && 
+              Array.isArray(error._errors) && 
+              error._errors.length && 
+              !allErrorMessages.some(msg => msg.startsWith(field))) {
+            allErrorMessages.push(`${field}: ${error._errors.join(', ')}`);
+          }
+        });
+        
+        console.log("Sending validation error response:", {
+          primaryMessage: primaryErrorMessage,
+          allErrors: allErrorMessages
+        });
+        
+        return res.status(400).json({ 
+          message: primaryErrorMessage, 
+          errors: allErrorMessages
+        });
+      }
+      
+      const data = validationResult.data;
       
       // Check if email already exists
       const existingUser = await storage.getUserByEmail(data.email);
@@ -59,8 +144,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ message: "Email already in use" });
       }
       
-      // Create user
-      const user = await storage.createUser(data);
+      // Hash the password before storing it
+      const hashedPassword = await hashPassword(data.password);
+      
+      // Create user with hashed password
+      const user = await storage.createUser({
+        ...data,
+        password: hashedPassword
+      });
+      
       if (!user) {
         return res.status(500).json({ message: "Failed to create user" });
       }
@@ -75,15 +167,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
         secure: process.env.NODE_ENV === "production"
       });
       
+      // Log successful registration
+      console.log(`New user registered: ${user.email} (ID: ${user.id})`);
+      
       // Send user info (without password)
       const { password, ...userWithoutPassword } = user;
       res.status(201).json(userWithoutPassword);
     } catch (error) {
       if (error instanceof ZodError) {
-        res.status(400).json({ message: "Invalid input", errors: error.errors });
+        console.error("Registration ZodError:", error.errors);
+        res.status(400).json({ 
+          message: "Invalid input data. Please check all fields and try again.", 
+          errors: error.errors 
+        });
       } else {
         console.error("Registration error:", error);
-        res.status(500).json({ message: "Registration failed" });
+        res.status(500).json({ message: "Server error while creating account. Please try again later." });
       }
     }
   });
@@ -200,12 +299,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Send user info (without password)
       const { password, ...userWithoutPassword } = user;
       
-      // Ensure role is properly sent (explicitly include it even if null)
+      // Ensure role is properly sent with detailed logging
+      console.log("Login successful - Raw user data from DB:", {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        roleType: typeof user.role
+      });
+      
+      // Create a clean user object with explicit role handling
       const userData = {
         ...userWithoutPassword,
-        // Ensure role is a string value to avoid type issues on the client
-        role: user.role || 'user'
+        // Normalize role to avoid any type issues
+        role: user.role ? String(user.role) : 'user'
       };
+      
+      console.log("Sending user data to client:", userData);
       
       res.json(userData);
     } catch (error) {
@@ -221,15 +330,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Logout
   app.post("/api/auth/logout", async (req: Request, res: Response) => {
     try {
-      // Clear session if exists
-      if (req.session?.id) {
-        await storage.deleteSession(req.session.id);
+      // Get sessionId from cookie
+      const sessionId = req.cookies.sessionId;
+      
+      // Clear session if sessionId exists
+      if (sessionId) {
+        console.log("Logging out session:", sessionId);
+        await storage.deleteSession(sessionId);
+      } else {
+        console.log("No sessionId found in cookies during logout");
       }
       
       // Clear cookie
       res.clearCookie("sessionId");
       
-      res.json({ message: "Logged out successfully" });
+      res.status(200).json({ message: "Logged out successfully" });
     } catch (error) {
       console.error("Logout error:", error);
       res.status(500).json({ message: "Logout failed" });
@@ -311,12 +426,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Remove sensitive data
       const { password, ...userWithoutPassword } = user;
       
-      // Ensure role is properly sent (explicitly include it even if null)
+      // Ensure role is properly sent with detailed logging
+      console.log("Auth/me endpoint - Raw user data from DB:", {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        roleType: typeof user.role
+      });
+      
+      // Create a clean user object with explicit role handling
       const userData = {
         ...userWithoutPassword,
-        // Ensure role is a string value to avoid type issues on the client
-        role: user.role || 'user'
+        // Normalize role to avoid any type issues
+        role: user.role ? String(user.role) : 'user'
       };
+      
+      console.log("Auth/me sending user data to client:", userData);
       
       res.json(userData);
     } catch (error) {

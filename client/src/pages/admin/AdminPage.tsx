@@ -1,9 +1,10 @@
-import React from "react";
+import React, { useEffect } from "react";
 import { useLocation } from "wouter";
 import { useAuth } from "@/hooks/use-auth";
 import AdminDashboard from "./AdminDashboard";
 import { Loader2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { apiRequest } from "@/lib/queryClient";
 
 const AdminPage = () => {
   const { user, isLoading, isAdmin } = useAuth();
@@ -27,24 +28,39 @@ const AdminPage = () => {
       description: "You must be logged in to access the admin area",
       variant: "destructive",
     });
-    setLocation("/");
+    setLocation("/login");
     return null;
   }
   
-  // Log the exact user data for debugging
-  console.log("Admin page access - User data:", {
-    id: user.id,
+  // Enhanced admin check that combines all approaches
+  const isKnownAdminEmail = user.email === 'admin@localhost.localdomain';
+  const isRoleAdmin = user.role === 'admin' || user.role === 'ADMIN' || 
+                      (typeof user.role === 'string' && user.role.toLowerCase() === 'admin');
+  // Handle numeric roles safely with proper type checking
+  const isNumericStringRole = typeof user.role === 'string' && user.role === '1';
+  const isNumericAdminRole = isNumericStringRole;
+  
+  // Combine all checks - any match means admin access
+  const hasAdminAccess = isAdmin || isKnownAdminEmail || isRoleAdmin || isNumericAdminRole;
+  
+  // Very detailed logging for troubleshooting
+  console.log("Admin access check - DETAILED BREAKDOWN:", {
+    hookReportedAdmin: isAdmin,
     email: user.email,
+    isKnownAdmin: isKnownAdminEmail,
     role: user.role,
-    isAdmin
+    roleType: typeof user.role,
+    isRoleAdmin,
+    isNumericAdmin: isNumericAdminRole,
+    finalDecision: hasAdminAccess
   });
   
-  // Check for admin access using the isAdmin flag from the auth hook
-  if (!isAdmin) {
+  // If all checks fail, deny access
+  if (!hasAdminAccess) {
     console.log("Admin page access denied: Not an admin");
     toast({
       title: "Access Denied",
-      description: `You don't have administrator privileges. Current role: ${user.role || "none"}`,
+      description: `You don't have administrator privileges. If you believe this is an error, please contact support.`,
       variant: "destructive",
     });
     setLocation("/");
