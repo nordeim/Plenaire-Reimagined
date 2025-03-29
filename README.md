@@ -5,6 +5,7 @@
 ![image](https://github.com/user-attachments/assets/893089ed-a944-4f47-8572-d1778fa05ace)
 
 [desgin document](https://github.com/nordeim/Plenaire-Reimagined/blob/main/detailed_technical_design_specification_document_updated.md)  
+independent code [review design document](https://github.com/nordeim/Plenaire-Reimagined/blob/main/detailed_design_review_document.md)  
 [database creation script](https://github.com/nordeim/Plenaire-Reimagined/blob/main/create_db_updated.py)  
 
 [website](https://replit.com/@phileaywonglump/TaskMaster)
